@@ -1,0 +1,4 @@
+Zydis 4.1.0 amalgamated (Zydis.h / Zydis.c)
+https://github.com/zyantific/zydis/releases/tag/v4.1.0
+
+MIT License. See the headers in Zydis.h / Zydis.c.

@@ -1,0 +1,7 @@
+{
+  "id": "com.bsi.lydis",
+  "name": "Lydis",
+  "version": "0.1.0",
+  "author": "bsi",
+  "description": "x86/x64 disassembly from entry point or hex cursor."
+}
