@@ -30,6 +30,7 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(ProjectDir)..\..\sdk\imgui\bsi_imgui.props" />
   <PropertyGroup>
     <TargetName>lydis</TargetName>
   </PropertyGroup>
@@ -76,6 +77,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\disasm.cpp" />
+    <ClCompile Include="src\format.cpp" />
     <ClCompile Include="src\plugin.cpp" />
     <ClCompile Include="third_party\amalgamated-dist\Zydis.c">
       <CompileAs>CompileAsC</CompileAs>
@@ -87,6 +89,7 @@
   <ItemGroup>
     <ClInclude Include="include\bsi_plugin.h" />
     <ClInclude Include="src\disasm.h" />
+    <ClInclude Include="src\format.h" />
     <ClInclude Include="third_party\amalgamated-dist\Zydis.h" />
   </ItemGroup>
   <ItemGroup>

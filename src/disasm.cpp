@@ -1,4 +1,5 @@
 #include "disasm.h"
+#include "format.h"
 
 extern "C" {
 #include <Zydis.h>
@@ -87,6 +88,143 @@ static uint64_t ParseHexTarget(const char* ops)
     return 0;
 }
 
+static void FillLineText(LyLine* line, int show_bytes)
+{
+    char bytes[48];
+    bytes[0] = 0;
+    if (show_bytes)
+    {
+        int used = 0;
+        int n = line->bytes_n;
+        if (n > 10)
+            n = 10;
+        for (int i = 0; i < n && used < (int)sizeof(bytes) - 4; i++)
+            used += snprintf(bytes + used, sizeof(bytes) - (size_t)used, "%02X ", line->bytes[i]);
+        if (line->size > 10 && used < (int)sizeof(bytes) - 3)
+            snprintf(bytes + used, sizeof(bytes) - (size_t)used, "..");
+        snprintf(line->text, kLyTextCap, "%016llX  %-32s %s %s",
+            (unsigned long long)line->va, bytes, line->mnemonic, line->operands);
+    }
+    else
+    {
+        snprintf(line->text, kLyTextCap, "%016llX  %s %s",
+            (unsigned long long)line->va, line->mnemonic, line->operands);
+    }
+}
+
+int LyDecodeOne(const uint8_t* image, size_t image_n,
+    uint32_t file_off, uint64_t va, uint16_t machine,
+    int show_bytes, LyLine* out)
+{
+    if (!image || !out || (size_t)file_off >= image_n || !LyMachineOk(machine))
+        return 0;
+
+    memset(out, 0, sizeof(*out));
+    ZydisMachineMode mode = machine == kLyMachineAmd64
+        ? ZYDIS_MACHINE_MODE_LONG_64
+        : ZYDIS_MACHINE_MODE_LEGACY_32;
+    ZydisStackWidth sw = machine == kLyMachineAmd64
+        ? ZYDIS_STACK_WIDTH_64
+        : ZYDIS_STACK_WIDTH_32;
+
+    ZydisDecoder decoder;
+    if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, mode, sw)))
+        return 0;
+    ZydisDecodedInstruction inst;
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, image + file_off,
+            image_n - file_off, &inst, operands)) || inst.length == 0)
+        return 0;
+
+    ZydisFormatter fmt;
+    ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
+    ZydisFormatterSetProperty(&fmt, ZYDIS_FORMATTER_PROP_HEX_PREFIX, (ZyanUPointer)"0x");
+    ZydisFormatterSetProperty(&fmt, ZYDIS_FORMATTER_PROP_HEX_UPPERCASE, ZYAN_FALSE);
+
+    char text[256];
+    text[0] = 0;
+    ZydisFormatterFormatInstruction(&fmt, &inst, operands, inst.operand_count_visible,
+        text, sizeof(text), va, ZYAN_NULL);
+
+    out->file_off = file_off;
+    out->size = inst.length;
+    out->va = va;
+    out->bytes_n = inst.length;
+    if (out->bytes_n > kLyInsnBytesCap)
+        out->bytes_n = kLyInsnBytesCap;
+    memcpy(out->bytes, image + file_off, out->bytes_n);
+
+    const char* sep = strpbrk(text, " \t");
+    if (sep)
+    {
+        size_t m = (size_t)(sep - text);
+        if (m >= kLyMnemonicCap)
+            m = kLyMnemonicCap - 1;
+        memcpy(out->mnemonic, text, m);
+        out->mnemonic[m] = 0;
+        while (*sep == ' ' || *sep == '\t')
+            sep++;
+        char pretty[kLyOperandsCap];
+        LyBeautifyOperands(sep, pretty, (int)sizeof(pretty));
+        snprintf(out->operands, kLyOperandsCap, "%s", pretty);
+    }
+    else
+        snprintf(out->mnemonic, kLyMnemonicCap, "%s", text);
+
+    if (inst.meta.category == ZYDIS_CATEGORY_RET)
+        out->flow = kLyFlowRet;
+    else if (inst.meta.category == ZYDIS_CATEGORY_CALL)
+        out->flow = kLyFlowCall;
+    else if (inst.meta.category == ZYDIS_CATEGORY_UNCOND_BR)
+        out->flow = kLyFlowJmp;
+    else if (inst.meta.category == ZYDIS_CATEGORY_COND_BR)
+        out->flow = kLyFlowCondJmp;
+
+    if (out->flow == kLyFlowCall || out->flow == kLyFlowJmp || out->flow == kLyFlowCondJmp)
+    {
+        for (ZyanU8 i = 0; i < inst.operand_count_visible; i++)
+        {
+            ZyanU64 abs = 0;
+            if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&inst, &operands[i], va, &abs)))
+            {
+                out->target_va = abs;
+                break;
+            }
+        }
+        if (!out->target_va)
+            out->target_va = ParseHexTarget(out->operands);
+    }
+
+    for (ZyanU8 i = 0; i < inst.operand_count_visible; i++)
+    {
+        if (operands[i].type == ZYDIS_OPERAND_TYPE_MEMORY)
+        {
+            ZyanU64 abs = 0;
+            if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&inst, &operands[i], va, &abs)))
+            {
+                out->mem_va = abs;
+                break;
+            }
+        }
+    }
+
+    FillLineText(out, show_bytes);
+    return 1;
+}
+
+void LyFillDataByte(const uint8_t* image, uint32_t file_off, uint64_t va, int show_bytes, LyLine* out)
+{
+    memset(out, 0, sizeof(*out));
+    out->file_off = file_off;
+    out->size = 1;
+    out->va = va;
+    out->bytes_n = 1;
+    out->bytes[0] = image[file_off];
+    snprintf(out->mnemonic, kLyMnemonicCap, "db");
+    snprintf(out->operands, kLyOperandsCap, "0x%02X", out->bytes[0]);
+    FillLineText(out, show_bytes);
+}
+
 int LyDisasm(const uint8_t* image, size_t image_n,
     uint32_t file_off, uint64_t va, uint16_t machine,
     int max_insn, int show_bytes,
@@ -119,103 +257,15 @@ int LyDisasm(const uint8_t* image, size_t image_n,
     if (max_insn > cap)
         max_insn = cap;
 
-    ZydisMachineMode mode = machine == kLyMachineAmd64
-        ? ZYDIS_MACHINE_MODE_LONG_64
-        : ZYDIS_MACHINE_MODE_LEGACY_32;
-
     int n = 0;
     size_t off = file_off;
     uint64_t runtime = va;
     while (n < max_insn && off < image_n)
     {
-        ZydisDisassembledInstruction insn{};
-        ZyanStatus st = ZydisDisassembleIntel(mode, runtime,
-            image + off, image_n - off, &insn);
-        if (!ZYAN_SUCCESS(st) || insn.info.length == 0)
+        if (!LyDecodeOne(image, image_n, (uint32_t)off, runtime, machine, show_bytes, &out[n]))
             break;
-
-        LyLine& line = out[n];
-        line.file_off = (uint32_t)off;
-        line.size = insn.info.length;
-        line.va = runtime;
-        line.bytes_n = insn.info.length;
-        if (line.bytes_n > kLyInsnBytesCap)
-            line.bytes_n = kLyInsnBytesCap;
-        if (line.bytes_n > 0)
-            memcpy(line.bytes, image + off, line.bytes_n);
-        else
-            line.bytes_n = 0;
-        line.mnemonic[0] = 0;
-        line.operands[0] = 0;
-        const char* asm_text = insn.text ? insn.text : "";
-        if (asm_text[0])
-        {
-            const char* sep = strpbrk(asm_text, " \t");
-            if (sep)
-            {
-                size_t m = (size_t)(sep - asm_text);
-                if (m >= kLyMnemonicCap)
-                    m = kLyMnemonicCap - 1;
-                memcpy(line.mnemonic, asm_text, m);
-                line.mnemonic[m] = 0;
-
-                const char* ops = sep;
-                while (*ops == ' ' || *ops == '\t')
-                    ops++;
-                snprintf(line.operands, kLyOperandsCap, "%s", ops);
-            }
-            else
-            {
-                snprintf(line.mnemonic, kLyMnemonicCap, "%s", asm_text);
-            }
-        }
-        line.flow = kLyFlowNone;
-        line.target_va = 0;
-        if (MnStarts(line.mnemonic, "ret"))
-        {
-            line.flow = kLyFlowRet;
-        }
-        else if (MnStarts(line.mnemonic, "call"))
-        {
-            line.flow = kLyFlowCall;
-            line.target_va = ParseHexTarget(line.operands);
-        }
-        else if (MnStarts(line.mnemonic, "jmp"))
-        {
-            line.flow = kLyFlowJmp;
-            line.target_va = ParseHexTarget(line.operands);
-        }
-        else if (line.mnemonic[0] == 'j' || line.mnemonic[0] == 'J')
-        {
-            // Rough heuristic: treat j* (except plain jmp) as conditional jumps.
-            if (!MnStarts(line.mnemonic, "jmp"))
-            {
-                line.flow = kLyFlowCondJmp;
-                line.target_va = ParseHexTarget(line.operands);
-            }
-        }
-        if (show_bytes)
-        {
-            char bytes[48];
-            bytes[0] = 0;
-            int used = 0;
-            uint8_t len = insn.info.length;
-            if (len > 10)
-                len = 10;
-            for (uint8_t i = 0; i < len && used < (int)sizeof(bytes) - 4; i++)
-                used += snprintf(bytes + used, sizeof(bytes) - (size_t)used, "%02X ", image[off + i]);
-            if (insn.info.length > 10 && used < (int)sizeof(bytes) - 3)
-                snprintf(bytes + used, sizeof(bytes) - (size_t)used, "..");
-            snprintf(line.text, kLyTextCap, "%016llX  %-32s %s",
-                (unsigned long long)runtime, bytes, asm_text);
-        }
-        else
-        {
-            snprintf(line.text, kLyTextCap, "%016llX  %s",
-                (unsigned long long)runtime, asm_text);
-        }
-        off += insn.info.length;
-        runtime += insn.info.length;
+        off += out[n].size;
+        runtime += out[n].size;
         n++;
     }
     if (n == 0 && err && err_cap > 0)

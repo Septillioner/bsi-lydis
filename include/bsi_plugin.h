@@ -149,7 +149,9 @@ enum
     BsiTokLabel,
     BsiTokField,
     BsiTokNamespace,
-    BsiTokUnknown
+    BsiTokUnknown,
+    BsiTokImport,
+    BsiTokBranch
 };
 
 // Optional card art. Paths are local (relative to the DLL directory, or absolute).
@@ -188,6 +190,10 @@ struct BsiUi
     void (*begin_disabled)(void* ctx, int disabled);
     void (*end_disabled)(void* ctx);
     void (*tooltip)(void* ctx, const char* text);
+
+    // Level 2 UI: host ImGuiContext* / ImNodesContext* (probe with BSI_UI_HAS).
+    void* imgui;
+    void* imnodes;
 };
 
 struct BsiHost
@@ -290,6 +296,10 @@ struct BsiHost
     uint32_t (*theme_code_color)(void* ctx, uint32_t token_kind); // ImU32
     uint64_t (*image_epoch)(void* ctx); // changes on any byte mutation (apply/undo/redo)
     int      (*image_dirty)(void* ctx); // PeJobDirty() -> 0/1
+
+    void (*progress_set)(void* ctx, const char* task_id, const char* title, const char* stage, float frac);
+    void (*progress_clear)(void* ctx, const char* task_id);
+    int  (*progress_want_cancel)(void* ctx, const char* task_id);
 };
 
 // Original v2 block is present (through json_dump). Prefer this in Init.
