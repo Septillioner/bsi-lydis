@@ -11,7 +11,19 @@ enum
     kLyInsnMax = 512,
     kLyInsnDefault = 128,
     kLyLineCap = 512,
-    kLyTextCap = 160
+    kLyTextCap = 160,
+    kLyInsnBytesCap = 16,
+    kLyMnemonicCap = 32,
+    kLyOperandsCap = 96
+};
+
+enum
+{
+    kLyFlowNone = 0,
+    kLyFlowJmp = 1,
+    kLyFlowCondJmp = 2,
+    kLyFlowCall = 3,
+    kLyFlowRet = 4
 };
 
 struct LyLine
@@ -19,6 +31,12 @@ struct LyLine
     uint32_t file_off;
     uint32_t size;
     uint64_t va;
+    uint8_t  bytes[kLyInsnBytesCap];
+    uint8_t  bytes_n;
+    char     mnemonic[kLyMnemonicCap];
+    char     operands[kLyOperandsCap];
+    uint32_t flow;
+    uint64_t target_va;
     char     text[kLyTextCap];
 };
 
