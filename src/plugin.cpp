@@ -16,8 +16,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <math.h>
+#include <stdlib.h>
 
-static const char kId[] = "com.bsi.lydis";
+static const char kId[] = "com.septillioner.bsi.lydis";
 static const char kName[] = "Lydis";
 static const char kVersion[] = "0.1.0";
 static const char kModule[] = "lydis";
@@ -124,6 +125,7 @@ static std::vector<LyLine> g_lines;
 static std::vector<LyFunction> g_funcs;
 static char g_status[192];
 static char g_search[96];
+static char g_fn_find[96];
 static int g_origin = kOriginEntry;
 static int g_sel = -1;
 static int g_func_sel = 0;
@@ -132,6 +134,7 @@ static int g_dec_sel_end = -1;
 static bool g_dirty = true;
 static bool g_scroll_listing = false;
 static uint32_t g_pushed_hex_off = 0xFFFFFFFFu;
+static uint32_t g_last_hex_off = 0xFFFFFFFFu;
 static std::vector<LyRow> g_rows;
 static std::mutex g_mu;
 static std::thread g_worker;
@@ -147,6 +150,7 @@ static char g_goto[40];
 static double g_flash_until = 0.0;
 static int g_xref_sel = -1;
 static uint64_t g_seen_epoch = 0;
+static int g_scroll_row = -1;
 
 static void Logf(int sev, const char* fmt, ...)
 {
@@ -269,9 +273,11 @@ static void ClearListing()
     g_dec_sel_end = -1;
     g_status[0] = 0;
     g_search[0] = 0;
+    g_fn_find[0] = 0;
     g_dirty = true;
     g_scroll_listing = false;
     g_pushed_hex_off = 0xFFFFFFFFu;
+    g_last_hex_off = 0xFFFFFFFFu;
     g_seen_epoch = 0;
     g_cancel.store(0);
 }
@@ -280,6 +286,36 @@ static int InsnIndexByVa(const std::vector<LyLine>& insns, uint64_t va)
 {
     for (int i = 0; i < (int)insns.size(); i++)
         if (insns[(size_t)i].va == va)
+            return i;
+    for (int i = 0; i < (int)insns.size(); i++)
+    {
+        const LyLine& l = insns[(size_t)i];
+        if (va >= l.va && va < l.va + l.size)
+            return i;
+    }
+    return -1;
+}
+
+static uint64_t ParseNamedVa(const char* s)
+{
+    if (!s || !s[0])
+        return 0;
+    while (*s == ' ' || *s == '\t' || *s == '[' || *s == '+')
+        s++;
+    if (!strncmp(s, "loc_", 4) || !strncmp(s, "sub_", 4))
+        return strtoull(s + 4, nullptr, 16);
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        return strtoull(s, nullptr, 16);
+    return 0;
+}
+
+static int RowIndexForInsn(int insn)
+{
+    for (int i = 0; i < (int)g_rows.size(); i++)
+        if (g_rows[(size_t)i].kind == kLyRowInsn && g_rows[(size_t)i].insn_idx == insn)
+            return i;
+    for (int i = 0; i < (int)g_rows.size(); i++)
+        if (g_rows[(size_t)i].insn_idx == insn)
             return i;
     return -1;
 }
@@ -1272,20 +1308,18 @@ static void SelectFunction(int fi)
 {
     if (fi < 0 || fi >= (int)g_funcs.size())
         return;
-    g_func_sel = fi;
     EnsureAnalyzed(fi);
-    g_sel = g_funcs[(size_t)fi].start_idx;
     g_dec_sel = 0;
     g_dec_sel_end = 0;
-    g_scroll_listing = true;
-    GotoInsn(g_sel);
+    GotoInsn(g_funcs[(size_t)fi].start_idx);
 }
 
 static void GotoInsn(int i)
 {
-    if (i < 0 || i >= (int)g_insns.size() || !g_host)
+    if (i < 0 || i >= (int)g_insns.size())
         return;
     g_sel = i;
+    g_scroll_row = RowIndexForInsn(i);
     g_scroll_listing = true;
     const LyLine& line = g_insns[(size_t)i];
     int fi = FuncIndexByVa(line.va);
@@ -1297,9 +1331,9 @@ static void GotoInsn(int i)
     PushNav(line.va);
     g_flash_until = ImGui::GetTime() + 0.45;
     g_pushed_hex_off = line.file_off;
-    if (g_host->hex_select)
+    if (g_host && g_host->hex_select)
         g_host->hex_select(g_host->ctx, line.file_off, line.size);
-    else if (g_host->hex_goto)
+    else if (g_host && g_host->hex_goto)
         g_host->hex_goto(g_host->ctx, line.file_off);
 }
 
@@ -1324,7 +1358,13 @@ static void SyncFromHex()
     if (!g_host->hex_cursor(g_host->ctx, &off, &n))
         return;
     if (off == g_pushed_hex_off)
+    {
+        g_last_hex_off = off;
         return;
+    }
+    if (off == g_last_hex_off)
+        return;
+    g_last_hex_off = off;
     for (int i = 0; i < (int)g_insns.size(); i++)
     {
         const LyLine& l = g_insns[(size_t)i];
@@ -1520,12 +1560,25 @@ static void DrawListingView()
     else
     {
         PushMonoFont();
+        const float gutter = 18.f;
         const float ch = ImGui::CalcTextSize("0").x;
         const float addr_w = CfgShowAddr() ? ch * 13.f : 0.f;
         const float bytes_w = CfgShowBytes() ? ch * 20.f : 0.f;
         const float mn_w = ch * 10.f;
+        const float line_h = ImGui::GetTextLineHeightWithSpacing();
         ImGui::BeginChild("ly_code", ImVec2(0.f, -28.f), ImGuiChildFlags_None,
             ImGuiWindowFlags_HorizontalScrollbar);
+        if (g_scroll_listing)
+        {
+            int ri = g_scroll_row >= 0 ? g_scroll_row : RowIndexForInsn(g_sel);
+            if (ri < 0)
+                ri = g_sel;
+            float y = (float)ri * line_h - ImGui::GetWindowHeight() * 0.28f;
+            if (y < 0.f)
+                y = 0.f;
+            ImGui::SetScrollY(y);
+            g_scroll_listing = false;
+        }
         if (ImGui::IsWindowFocused())
         {
             if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && g_sel > 0)
@@ -1541,24 +1594,38 @@ static void DrawListingView()
                 GotoVa(g_insns[(size_t)g_sel].target_va);
         }
 
+        struct VisInsn
+        {
+            int insn;
+            uint64_t va;
+            float y;
+        };
+        VisInsn vis[192];
+        int vis_n = 0;
+        struct VisJmp
+        {
+            int insn;
+            uint64_t va;
+            uint64_t target;
+            float y;
+        };
+        VisJmp jmps[96];
+        int jmp_n = 0;
+
         ImGuiListClipper clipper;
-        clipper.Begin((int)g_rows.size());
+        clipper.Begin((int)g_rows.size(), line_h);
+        int include_row = g_scroll_row >= 0 ? g_scroll_row : RowIndexForInsn(g_sel);
+        if (include_row >= 0)
+            clipper.IncludeItemByIndex(include_row);
         while (clipper.Step())
         {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
             {
                 const LyRow& row = g_rows[(size_t)i];
                 bool sel = (row.kind == kLyRowInsn && row.insn_idx == g_sel);
-                if (g_scroll_listing && sel)
-                {
-                    ImGui::SetScrollHereY(0.25f);
-                    g_scroll_listing = false;
-                }
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 float w = ImGui::GetWindowWidth();
-                float h = ImGui::GetTextLineHeightWithSpacing();
-                if (row.kind == kLyRowHeader)
-                    h *= 1.15f;
+                float h = line_h;
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 ImU32 bg = 0;
                 if (sel)
@@ -1570,35 +1637,46 @@ static void DrawListingView()
                 if (bg)
                     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), bg);
 
-                char rid[24];
-                snprintf(rid, sizeof(rid), "##r%d", i);
+                if (row.kind == kLyRowInsn && vis_n < 192)
+                {
+                    vis[vis_n].insn = row.insn_idx;
+                    vis[vis_n].va = row.va;
+                    vis[vis_n].y = p.y + h * 0.5f;
+                    vis_n++;
+                }
+                if (row.kind == kLyRowInsn && jmp_n < 96
+                    && (row.flow == kLyFlowJmp || row.flow == kLyFlowCondJmp)
+                    && row.target_va)
+                {
+                    jmps[jmp_n].insn = row.insn_idx;
+                    jmps[jmp_n].va = row.va;
+                    jmps[jmp_n].target = row.target_va;
+                    jmps[jmp_n].y = p.y + h * 0.5f;
+                    jmp_n++;
+                }
+
                 ImGui::PushID(i);
-                if (ImGui::InvisibleButton(rid, ImVec2(w, h)))
+                ImGui::InvisibleButton("##r", ImVec2(w, h), ImGuiButtonFlags_AllowOverlap);
+                bool hovered = ImGui::IsItemHovered();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
                 {
                     if (row.insn_idx >= 0)
                         GotoInsn(row.insn_idx);
+                    else if (row.kind == kLyRowLabel && row.va)
+                        GotoVa(row.va);
                     if (row.kind == kLyRowHeader && row.xref_n)
                         g_xref_sel = row.func_idx;
+                    uint64_t follow = row.target_va ? row.target_va : ParseNamedVa(row.mnemonic);
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && follow)
+                        GotoVa(follow);
                 }
-                if (ImGui::IsItemHovered())
-                {
+                if (hovered)
                     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), CodeCol(BsiTokAddress) & 0x14FFFFFFu);
-                    if (row.kind == kLyRowInsn)
-                    {
-                        if (ImGui::BeginTooltip())
-                        {
-                            ImGui::TextUnformatted(Tr("lydis.tip.addr", "Where this instruction is located in memory."));
-                            ImGui::TextUnformatted(Tr("lydis.tip.bytes", "The raw machine-code bytes for this instruction."));
-                            ImGui::EndTooltip();
-                        }
-                    }
-                    if (ImGui::IsMouseDoubleClicked(0) && row.target_va)
-                        GotoVa(row.target_va);
-                }
                 if (ImGui::BeginPopupContextItem("insn_ctx"))
                 {
-                    if (row.target_va && ImGui::MenuItem(Tr("lydis.menu.follow", "Follow")))
-                        GotoVa(row.target_va);
+                    uint64_t follow = row.target_va ? row.target_va : ParseNamedVa(row.mnemonic);
+                    if (follow && ImGui::MenuItem(Tr("lydis.menu.follow", "Follow")))
+                        GotoVa(follow);
                     if (ImGui::MenuItem(Tr("lydis.menu.copy_insn", "Copy instruction")) && g_host && g_host->clipboard_set
                         && row.insn_idx >= 0 && row.insn_idx < (int)g_insns.size())
                         g_host->clipboard_set(g_host->ctx, g_insns[(size_t)row.insn_idx].text);
@@ -1618,7 +1696,7 @@ static void DrawListingView()
                     ImGui::EndPopup();
                 }
                 ImGui::SameLine(0.f, 0.f);
-                float x = 8.f;
+                float x = gutter + 4.f;
                 if (row.kind == kLyRowHeader)
                 {
                     ImGui::SetCursorPosX(x);
@@ -1632,7 +1710,17 @@ static void DrawListingView()
                 else if (row.kind == kLyRowLabel)
                 {
                     ImGui::SetCursorPosX(x + addr_w + bytes_w);
-                    ImGui::TextColored(Col4(BsiTokLabel), "%s:", row.mnemonic);
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.45f, 0.7f, 0.25f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.35f, 0.45f, 0.7f, 0.4f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, Col4(BsiTokLabel));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
+                    char lab[80];
+                    snprintf(lab, sizeof(lab), "%s:", row.mnemonic);
+                    if (ImGui::SmallButton(lab))
+                        GotoVa(row.va);
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(4);
                 }
                 else
                 {
@@ -1661,7 +1749,33 @@ static void DrawListingView()
                     ImGui::SameLine(x, 0.f);
                     for (uint8_t t = 0; t < row.op_n; t++)
                     {
-                        ImGui::TextColored(Col4(LyTokToBsi(row.ops[t].kind)), "%s", row.ops[t].text);
+                        uint16_t kind = row.ops[t].kind;
+                        uint64_t follow = row.target_va;
+                        if (!follow)
+                            follow = ParseNamedVa(row.ops[t].text);
+                        bool can_follow = follow && (kind == kLyTokBranch || kind == kLyTokFn
+                            || kind == kLyTokLabel || kind == kLyTokImm || kind == kLyTokSym);
+                        if (can_follow)
+                        {
+                            ImGui::PushID((int)t);
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.45f, 0.7f, 0.25f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.35f, 0.45f, 0.7f, 0.4f));
+                            ImGui::PushStyleColor(ImGuiCol_Text, Col4(LyTokToBsi(kind)));
+                            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
+                            if (ImGui::SmallButton(row.ops[t].text))
+                                GotoVa(follow);
+                            if (ImGui::IsItemHovered() && ImGui::BeginTooltip())
+                            {
+                                ImGui::Text("Follow  0x%llX", (unsigned long long)follow);
+                                ImGui::EndTooltip();
+                            }
+                            ImGui::PopStyleVar();
+                            ImGui::PopStyleColor(4);
+                            ImGui::PopID();
+                        }
+                        else
+                            ImGui::TextColored(Col4(LyTokToBsi(kind)), "%s", row.ops[t].text);
                         if (t + 1 < row.op_n)
                             ImGui::SameLine(0.f, 0.f);
                     }
@@ -1673,6 +1787,49 @@ static void DrawListingView()
                 }
                 ImGui::PopID();
             }
+        }
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 wp = ImGui::GetWindowPos();
+        float clip_t = wp.y;
+        float clip_b = wp.y + ImGui::GetWindowHeight();
+        auto dash = [&](float x, float y0, float y1, ImU32 col)
+        {
+            if (y0 > y1)
+            {
+                float t = y0;
+                y0 = y1;
+                y1 = t;
+            }
+            for (float y = y0; y < y1; y += 6.f)
+            {
+                float yb = y + 3.f;
+                if (yb > y1)
+                    yb = y1;
+                dl->AddLine(ImVec2(x, y), ImVec2(x, yb), col, 1.f);
+            }
+        };
+        for (int ji = 0; ji < jmp_n; ji++)
+        {
+            const VisJmp& j = jmps[ji];
+            int dst = InsnIndexByVa(g_insns, j.target);
+            float y1 = j.target >= j.va ? clip_b - 4.f : clip_t + 4.f;
+            for (int k = 0; k < vis_n; k++)
+            {
+                if (vis[k].va == j.target || vis[k].insn == dst)
+                {
+                    y1 = vis[k].y;
+                    break;
+                }
+            }
+            float x = wp.x + 5.f + (float)((j.insn * 3) % 12);
+            bool hot = (j.insn == g_sel);
+            ImU32 col = hot ? CodeCol(BsiTokBranch) : (CodeCol(BsiTokComment) | 0x99000000u);
+            dash(x, j.y, y1, col);
+            dl->AddLine(ImVec2(x, j.y), ImVec2(x + 7.f, j.y), col, 1.f);
+            dl->AddLine(ImVec2(x, y1), ImVec2(x + 7.f, y1), col, 1.f);
+            ImVec2 tip(x + 8.f, y1);
+            dl->AddTriangleFilled(ImVec2(tip.x - 5.f, y1 - 3.5f), ImVec2(tip.x - 5.f, y1 + 3.5f), tip, col);
         }
         ImGui::EndChild();
         PopMonoFont();
@@ -1692,114 +1849,42 @@ static void DrawListingView()
         ImGui::TextDisabled("%s", g_status);
 } 
 
-static void DrawDecompilerView()
-{
-    if (g_funcs.empty())
-    {
-        ImGui::TextWrapped("Select a function to see a C-like reconstruction of what it does.");
-        return;
-    }
-    EnsureAnalyzed(g_func_sel);
-    const LyFunction& fn = g_funcs[(size_t)g_func_sel];
-    ImGui::Text("%s  0x%llX", fn.name, (unsigned long long)fn.start_va);
-    ImGui::SameLine();
-    ImGui::TextDisabled("Reconstructed from machine code; not original source.");
-    ImGui::SetNextItemWidth(-1.f);
-    ImGui::InputTextWithHint("##search_decompile", "Find in decompiler", g_search, (int)sizeof(g_search));
-    if (g_search[0] && ImGui::IsItemDeactivatedAfterEdit())
-    {
-        for (int i = 0; i < (int)fn.dec_lines.size(); i++)
-        {
-            if (strstr(fn.dec_lines[(size_t)i].text, g_search))
-            {
-                g_dec_sel = i;
-                g_dec_sel_end = i;
-                int li = (int)fn.dec_lines[(size_t)i].insn_idx;
-                if (li >= 0 && li < (int)fn.insns.size())
-                    GotoVa(fn.insns[(size_t)li].va);
-                break;
-            }
-        }
-    }
-
-    PushMonoFont();
-    ImGui::BeginChild("ly_decompiler", ImVec2(0.f, 0.f), ImGuiChildFlags_Borders,
-        ImGuiWindowFlags_HorizontalScrollbar);
-    ImGuiListClipper clipper;
-    clipper.Begin((int)fn.dec_lines.size());
-    while (clipper.Step())
-    {
-        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
-        {
-            const LyDecLine& ln = fn.dec_lines[(size_t)i];
-            int a = g_dec_sel < g_dec_sel_end ? g_dec_sel : g_dec_sel_end;
-            int b = g_dec_sel < g_dec_sel_end ? g_dec_sel_end : g_dec_sel;
-            bool selected = (i >= a && i <= b && a >= 0);
-            char id[24];
-            snprintf(id, sizeof(id), "##dl%d", i);
-            if (ImGui::Selectable(id, selected, ImGuiSelectableFlags_AllowOverlap))
-            {
-                if (ImGui::GetIO().KeyShift && g_dec_sel >= 0)
-                    g_dec_sel_end = i;
-                else
-                {
-                    g_dec_sel = i;
-                    g_dec_sel_end = i;
-                }
-                int li = (int)ln.insn_idx;
-                if (li >= 0 && li < (int)fn.insns.size())
-                    GotoVa(fn.insns[(size_t)li].va);
-            }
-            ImGui::SameLine(0.f, 0.f);
-            ImGui::TextDisabled("%4d  ", i + 1);
-            ImGui::SameLine();
-            uint32_t tok = BsiTokUnknown;
-            if (strstr(ln.text, "goto") || strstr(ln.text, "return") || strstr(ln.text, "if ("))
-                tok = BsiTokKeyword;
-            else if (ln.text[0] == '/' && ln.text[1] == '*')
-                tok = BsiTokComment;
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(CodeCol(tok)), "%s", ln.text);
-        }
-    }
-    if (ImGui::IsWindowFocused() && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)
-        && g_host && g_host->clipboard_set && g_dec_sel >= 0)
-    {
-        int a = g_dec_sel < g_dec_sel_end ? g_dec_sel : g_dec_sel_end;
-        int b = g_dec_sel < g_dec_sel_end ? g_dec_sel_end : g_dec_sel;
-        std::string text;
-        for (int i = a; i <= b && i < (int)fn.dec_lines.size(); i++)
-        {
-            text += fn.dec_lines[(size_t)i].text;
-            text += "\r\n";
-        }
-        g_host->clipboard_set(g_host->ctx, text.c_str());
-    }
-    if (ImGui::IsWindowFocused() && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false))
-    {
-        g_dec_sel = 0;
-        g_dec_sel_end = (int)fn.dec_lines.size() - 1;
-    }
-    ImGui::EndChild();
-    PopMonoFont();
-}
 
 static void DrawFunctionList(const char* child_id)
 {
     if (ImGui::BeginChild(child_id, ImVec2(0.f, 0.f), ImGuiChildFlags_Borders))
     {
-        ImGuiListClipper clipper;
-        clipper.Begin((int)g_funcs.size());
-        while (clipper.Step())
+        if (g_fn_find[0])
         {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+            for (int i = 0; i < (int)g_funcs.size(); i++)
             {
                 const LyFunction& f = g_funcs[(size_t)i];
+                if (!strstr(f.name, g_fn_find))
+                    continue;
                 char label[96];
                 snprintf(label, sizeof(label), "%s  (%d insn)", f.name, f.end_idx - f.start_idx + 1);
+                ImGui::PushID(i);
                 if (ImGui::Selectable(label, i == g_func_sel))
                     SelectFunction(i);
-                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
-                    SelectFunction(i);
+                ImGui::PopID();
+            }
+        }
+        else
+        {
+            ImGuiListClipper clipper;
+            clipper.Begin((int)g_funcs.size());
+            while (clipper.Step())
+            {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                {
+                    const LyFunction& f = g_funcs[(size_t)i];
+                    char label[96];
+                    snprintf(label, sizeof(label), "%s  (%d insn)", f.name, f.end_idx - f.start_idx + 1);
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(label, i == g_func_sel))
+                        SelectFunction(i);
+                    ImGui::PopID();
+                }
             }
         }
     }
@@ -1825,8 +1910,8 @@ BSI_PLUGIN_EXPORT const BsiPluginInfo* BsiPluginGetInfo(void)
         kId,
         kName,
         kVersion,
-        "bsi",
-        "x86/x64 listing of executable sections, functions, and decompiler.",
+        "septillioner",
+        "x86/x64 listing of executable sections and functions.",
         BSI_PLUGIN_ABI_VERSION,
         BsiKindTool | BsiKindView
     };
@@ -1892,7 +1977,7 @@ BSI_PLUGIN_EXPORT int BsiPluginToolRun(int index)
 
 BSI_PLUGIN_EXPORT int BsiPluginViewCount(void)
 {
-    return 4;
+    return 3;
 }
 
 BSI_PLUGIN_EXPORT int BsiPluginViewInfo(int index, BsiViewInfo* out)
@@ -1913,21 +1998,8 @@ BSI_PLUGIN_EXPORT int BsiPluginViewInfo(int index, BsiViewInfo* out)
         out->meta_version = 1;
         return 1;
     }
-    if (index == 1)
-    {
-        out->id = "decompile";
-        out->label = "Decompiler";
-        out->region = BsiViewRegionRight;
-        out->default_open = 1;
-        out->utility = 0;
-        out->menu_group = BsiViewMenuView;
-        out->min_w = 320.f;
-        out->min_h = 0.f;
-        out->meta_version = 1;
-        return 1;
-    }
 
-    if (index == 2)
+    if (index == 1)
     {
         out->id = "symbols";
         out->label = "Symbols";
@@ -1940,7 +2012,7 @@ BSI_PLUGIN_EXPORT int BsiPluginViewInfo(int index, BsiViewInfo* out)
         out->meta_version = 1;
         return 1;
     }
-    if (index == 3)
+    if (index == 2)
     {
         out->id = "xrefs";
         out->label = "Xrefs";
@@ -1970,18 +2042,13 @@ BSI_PLUGIN_EXPORT int BsiPluginViewDraw(int index, const BsiUi* ui)
     }
     if (index == 1)
     {
-        DrawDecompilerView();
-        return 1;
-    }
-    if (index == 2)
-    {
         ImGui::TextUnformatted(Tr("lydis.symbols", "Functions"));
         ImGui::SetNextItemWidth(-1.f);
-        ImGui::InputTextWithHint("##fnfind", Tr("lydis.search", "Search"), g_search, (int)sizeof(g_search));
+        ImGui::InputTextWithHint("##fnfind", Tr("lydis.search", "Search"), g_fn_find, (int)sizeof(g_fn_find));
         DrawFunctionList("sym_fns");
         return 1;
     }
-    if (index == 3)
+    if (index == 2)
     {
         ImGui::TextUnformatted(Tr("lydis.xrefs", "Xrefs"));
         if (g_sel < 0 || g_sel >= (int)g_insns.size())
