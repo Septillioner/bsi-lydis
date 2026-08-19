@@ -97,6 +97,15 @@
     <None Include="README.md" />
     <None Include="LICENSE" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\third_party\msvc\bsi_imgui.vcxproj">
+      <Project>{E4F8A1B2-3C5D-4E6F-8A90-1B2C3D4E5F60}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+      <UseLibraryDependencyInputs>false</UseLibraryDependencyInputs>
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CopyToHostPlugins" AfterTargets="Build">
     <PropertyGroup>
