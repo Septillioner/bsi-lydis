@@ -20,7 +20,7 @@
 
 static const char kId[] = "com.septillioner.bsi.lydis";
 static const char kName[] = "Lydis";
-static const char kVersion[] = "0.1.0";
+static const char kVersion[] = "0.1.1";
 static const char kModule[] = "lydis";
 static const char kCfgMaxInsn[] = "max_insn";
 static const char kCfgShowBytes[] = "show_bytes";

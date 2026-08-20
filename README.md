@@ -1,8 +1,8 @@
 # Lydis
 
-id: `com.bsi.lydis`  
-author: bsi  
-version: 0.1.0
+id: `com.septillioner.bsi.lydis`  
+author: septillioner  
+version: 0.1.1
 
 Drop-in [BinarySectorInspector](https://github.com/candestan/BinarySectorInspector) plugin. Linear x86/x64 disassembly from the PE entry point or the hex cursor.
 
@@ -66,7 +66,7 @@ Settings → Plugins → Lydis:
 | `max_insn` | 128 | 32–512 |
 | `show_bytes` | on | on/off |
 
-Stored by the host as `plugin.cfg.com.bsi.lydis.*`. Changing the plugin id orphans those keys.
+Stored by the host as `plugin.cfg.com.septillioner.bsi.lydis.*`. Changing the plugin id orphans those keys.
 
 ## Layout
 

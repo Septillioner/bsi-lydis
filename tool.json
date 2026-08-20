@@ -1,7 +1,7 @@
 {
   "id": "com.septillioner.bsi.lydis",
   "name": "Lydis",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "septillioner",
   "description": "x86/x64 listing of executable sections and functions."
 }
